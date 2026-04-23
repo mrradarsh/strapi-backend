@@ -1,34 +1,36 @@
 /**
- * Hostinger Production Server for Strapi v5
+ * server.js - Hostinger Entry Point
  *
- * ARCHITECTURE: Two-port proxy with retry
- *   - Proxy starts IMMEDIATELY on Hostinger's PORT (prevents 503 timeout)
- *   - Strapi starts on PORT+1 in the background (takes 30-60 sec)
- *   - Proxy retries connection to Strapi every 2 seconds until it's ready
+ * ARCHITECTURE:
+ *   - Proxy server starts IMMEDIATELY on Hostinger's PORT (no 503 timeout)
+ *   - Strapi runs in a CHILD PROCESS on PORT+1
+ *   - If Strapi crashes → child is auto-restarted after 5 seconds
+ *   - During restart → proxy shows a loading message (not 503)
  */
 
 const http = require('http');
 const path = require('path');
+const { fork } = require('child_process');
 
-const appDir = __dirname;
 const PROXY_PORT = parseInt(process.env.PORT || '1337', 10);
 const STRAPI_PORT = PROXY_PORT + 1;
 
-// Tell Strapi to use STRAPI_PORT (our proxy takes PROXY_PORT)
-process.env.PORT = String(STRAPI_PORT);
-process.env.HOST = '0.0.0.0';
-
-let statusMessage = '⏳ Strapi is loading... please wait 60 seconds and refresh.';
 let strapiReady = false;
-let proxyErrorInfo = '';
+let statusMessage = '⏳ Strapi is starting... please wait 60 seconds and refresh.';
+let lastError = '';
+let restartCount = 0;
 
-console.log('[server.js] Proxy port:', PROXY_PORT, '| Strapi port:', STRAPI_PORT);
+console.log('[server.js] Proxy:', PROXY_PORT, '| Strapi:', STRAPI_PORT);
 
-// ─── Proxy Server ───────────────────────────────────────────────────────────
+// ─── Proxy Server ────────────────────────────────────────────────────────────
 const proxyServer = http.createServer((clientReq, clientRes) => {
     if (!strapiReady) {
         clientRes.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        clientRes.end(statusMessage + (proxyErrorInfo ? '\n\nLast error: ' + proxyErrorInfo : ''));
+        clientRes.end(
+            statusMessage +
+            (lastError ? '\n\nLast error:\n' + lastError : '') +
+            (restartCount > 0 ? '\n\nRestart count: ' + restartCount : '')
+        );
         return;
     }
 
@@ -37,34 +39,29 @@ const proxyServer = http.createServer((clientReq, clientRes) => {
         port: STRAPI_PORT,
         path: clientReq.url,
         method: clientReq.method,
-        headers: {
-            ...clientReq.headers,
-            host: '127.0.0.1:' + STRAPI_PORT,
-        },
+        headers: { ...clientReq.headers, host: '127.0.0.1:' + STRAPI_PORT },
     };
 
     const proxyReq = http.request(options, (proxyRes) => {
-        // Rewrite Location headers so redirects point to the public domain
+        // Rewrite Location headers to use public domain
         const headers = { ...proxyRes.headers };
         if (headers.location) {
-            headers.location = headers.location.replace(
-                /http:\/\/127\.0\.0\.1:\d+/g,
-                'https://api.marathibusinesstribe.com'
-            );
+            headers.location = headers.location
+                .replace(/http:\/\/127\.0\.0\.1:\d+/g, 'https://api.marathibusinesstribe.com')
+                .replace(/http:\/\/localhost:\d+/g, 'https://api.marathibusinesstribe.com');
         }
         clientRes.writeHead(proxyRes.statusCode, headers);
         proxyRes.pipe(clientRes, { end: true });
     });
 
     proxyReq.on('error', (err) => {
-        proxyErrorInfo = err.message + ' (code: ' + err.code + ')';
-        strapiReady = false; // Strapi may have crashed
-        statusMessage = '⚠️ Strapi stopped responding. Error: ' + proxyErrorInfo;
+        lastError = err.message + ' (code: ' + err.code + ')';
+        strapiReady = false;
+        statusMessage = '⚠️ Strapi not responding, will restart in 5 seconds...';
         clientRes.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        clientRes.end(statusMessage);
+        clientRes.end(statusMessage + '\n\nError: ' + lastError);
     });
 
-    // Pipe request body for POST/PUT/PATCH
     if (!['GET', 'HEAD'].includes(clientReq.method)) {
         clientReq.pipe(proxyReq, { end: true });
     } else {
@@ -72,59 +69,56 @@ const proxyServer = http.createServer((clientReq, clientRes) => {
     }
 });
 
-// Start proxy IMMEDIATELY — Hostinger sees a listener right away (no timeout)
+// Start proxy FIRST — binds immediately so Hostinger doesn't timeout
 proxyServer.listen(PROXY_PORT, '0.0.0.0', () => {
-    console.log('[server.js] Proxy listening on port', PROXY_PORT);
-    loadStrapi();
+    console.log('[server.js] Proxy listening on', PROXY_PORT);
+    startStrapiWorker();
 });
 
-// ─── Error Guards ────────────────────────────────────────────────────────────
-process.on('unhandledRejection', (reason) => {
-    const msg = reason && reason.stack ? reason.stack : String(reason);
-    statusMessage = '❌ Async Error:\n\n' + msg;
-    console.error('[unhandledRejection]', msg);
-});
+// ─── Strapi Worker Manager ───────────────────────────────────────────────────
+function startStrapiWorker() {
+    const env = {
+        ...process.env,
+        PORT: String(STRAPI_PORT),
+        HOST: '0.0.0.0',
+        NODE_ENV: process.env.NODE_ENV || 'production',
+    };
 
-process.on('uncaughtException', (err) => {
-    const msg = err && err.stack ? err.stack : String(err);
-    statusMessage = '❌ Exception:\n\n' + msg;
-    console.error('[uncaughtException]', msg);
-});
+    console.log('[server.js] Forking strapi-runner on port', STRAPI_PORT);
 
-process.exit = (code) => {
-    statusMessage =
-        '❌ Strapi called process.exit(' + code + ').\n\n' +
-        'Check DATABASE env vars on Hostinger:\n' +
-        '  DATABASE_CLIENT=mysql\n' +
-        '  DATABASE_HOST=localhost\n' +
-        '  DATABASE_PORT=3306\n' +
-        '  DATABASE_NAME=u743540205_strapi\n' +
-        '  DATABASE_USERNAME=u743540205_strapi\n' +
-        '  DATABASE_PASSWORD=<your-password>\n' +
-        '  NODE_ENV=production';
-    console.error('[BLOCKED process.exit(' + code + ')]');
-};
+    const worker = fork(path.join(__dirname, 'strapi-runner.js'), [], {
+        env,
+        silent: false, // Let child process output go to console
+    });
 
-// ─── Load Strapi on STRAPI_PORT ──────────────────────────────────────────────
-async function loadStrapi() {
-    try {
-        const strapiPkg = require(path.join(appDir, 'node_modules', '@strapi', 'strapi'));
-        const createStrapi = strapiPkg.createStrapi;
-
-        if (typeof createStrapi !== 'function') {
-            statusMessage = '❌ createStrapi is not a function. Keys: ' + Object.keys(strapiPkg).join(', ');
-            return;
+    worker.on('message', (msg) => {
+        if (msg.type === 'ready') {
+            strapiReady = true;
+            statusMessage = '✅ Strapi is running.';
+            lastError = '';
+            console.log('[server.js] Strapi ready on port', STRAPI_PORT);
         }
+        if (msg.type === 'error') {
+            lastError = msg.message;
+            statusMessage = '❌ Strapi error (check below)';
+            console.error('[worker error]', msg.message);
+        }
+    });
 
-        console.log('[server.js] Starting Strapi on port', STRAPI_PORT, '...');
-        await createStrapi({ appDir, distDir: path.join(appDir, 'dist') }).start();
+    worker.on('exit', (code, signal) => {
+        strapiReady = false;
+        restartCount++;
+        const reason = signal ? 'signal ' + signal : 'code ' + code;
+        statusMessage = '⏳ Strapi stopped (' + reason + '). Restarting in 10s... (attempt ' + restartCount + ')';
+        console.log('[server.js] Worker exited:', reason, '| Restarting in 10s...');
 
-        strapiReady = true;
-        statusMessage = '✅ Strapi is running on internal port ' + STRAPI_PORT;
-        console.log('[server.js] Strapi ready on port', STRAPI_PORT);
+        // Auto-restart after 10 seconds
+        setTimeout(startStrapiWorker, 10000);
+    });
 
-    } catch (err) {
-        statusMessage = '❌ Strapi startup failed:\n\n' + (err && err.stack ? err.stack : String(err));
-        console.error('[loadStrapi]', statusMessage);
-    }
+    worker.on('error', (err) => {
+        lastError = err.message;
+        statusMessage = '❌ Could not start Strapi worker: ' + err.message;
+        console.error('[server.js] Worker spawn error:', err);
+    });
 }
