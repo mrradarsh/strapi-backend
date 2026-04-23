@@ -4,7 +4,7 @@
   "private": true,
   "description": "A Strapi application",
   "scripts": {
-    "build": "strapi build",
+    "build": "echo 'Using pre-built dist folder from git'",
     "console": "strapi console",
     "deploy": "strapi deploy",
     "dev": "strapi develop",
