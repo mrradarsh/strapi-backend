@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Production
+dist/
+
+# Environment
+.env
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database
+.tmp/
+*.db
