@@ -1,40 +1,43 @@
+const path = require('path');
 const http = require('http');
 
-process.on('unhandledRejection', (reason, promise) => {
+// *** FIX: Explicitly tell Node.js where to find node_modules ***
+// This resolves the "Cannot find module '@strapi/strapi'" error on Hostinger
+const appDir = __dirname;
+require('module').globalPaths.push(path.join(appDir, 'node_modules'));
+process.chdir(appDir);
+
+process.on('unhandledRejection', (reason) => {
     console.error('Unhandled Rejection:', reason);
-    try {
-        const server = http.createServer((req, res) => {
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Strapi Error (Unhandled Rejection):\n\n' + (reason && reason.stack ? reason.stack : String(reason)));
-        });
-        server.listen(process.env.PORT || 3000);
-    } catch(e) {}
+    startErrorServer('Strapi Error (Unhandled Rejection):\n\n' + (reason && reason.stack ? reason.stack : String(reason)));
 });
 
 process.on('uncaughtException', (err) => {
     console.error('Uncaught Exception:', err);
+    startErrorServer('Strapi Error (Uncaught Exception):\n\n' + (err && err.stack ? err.stack : String(err)));
+});
+
+let errorServerStarted = false;
+function startErrorServer(message) {
+    if (errorServerStarted) return;
+    errorServerStarted = true;
     try {
         const server = http.createServer((req, res) => {
             res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Strapi Error (Uncaught Exception):\n\n' + (err && err.stack ? err.stack : String(err)));
+            res.end(message);
         });
         server.listen(process.env.PORT || 3000);
-    } catch(e) {}
-});
+    } catch(e) { console.error(e); }
+}
 
 async function startApp() {
     try {
-        const { createStrapi } = require('@strapi/strapi');
-        const path = require('path');
-        // Start Strapi
-        await createStrapi({ appDir: __dirname, distDir: path.join(__dirname, 'dist') }).start();
+        // Use absolute path to load @strapi/strapi from our local node_modules
+        const strapiModule = require(path.join(appDir, 'node_modules', '@strapi', 'strapi'));
+        const createStrapi = strapiModule.createStrapi || strapiModule.default || strapiModule;
+        await createStrapi({ appDir, distDir: path.join(appDir, 'dist') }).start();
     } catch (error) {
-        // If Strapi fails, show the error in the browser
-        const server = http.createServer((req, res) => {
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Strapi Failed to Start. Error:\n\n' + (error && error.stack ? error.stack : String(error)));
-        });
-        server.listen(process.env.PORT || 3000);
+        startErrorServer('Strapi Failed to Start. Error:\n\n' + (error && error.stack ? error.stack : String(error)));
     }
 }
 
