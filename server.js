@@ -1,96 +1,137 @@
 /**
- * Hostinger Production Entry Point for Strapi v5
+ * Hostinger Production Server for Strapi v5
  * 
- * Strategy: Start a basic HTTP server FIRST to keep the process alive.
- * Then attempt to load Strapi. If Strapi fails for any reason (DB error,
- * module error, etc.), the basic HTTP server shows the exact error in the
- * browser instead of crashing to 503.
+ * Architecture: Two-port proxy
+ *   - PROXY_PORT (Hostinger's PORT) → always open, proxies to Strapi
+ *   - STRAPI_PORT (PROXY_PORT + 1)  → Strapi listens here internally
+ * 
+ * This prevents any gap where nothing is listening on Hostinger's port,
+ * which is the root cause of the 503 "Service Unavailable" error.
  */
 
 const http = require('http');
 const path = require('path');
 
 const appDir = __dirname;
-const PORT = process.env.PORT || 1337;
-const HOST = '0.0.0.0';
+const PROXY_PORT = parseInt(process.env.PORT || '1337', 10);
+const STRAPI_PORT = PROXY_PORT + 1; // e.g. if Hostinger gives 1337, Strapi uses 1338
 
-let statusMessage = 'Strapi is starting up... please refresh in 30 seconds.';
-let strapiStarted = false;
+// Tell Strapi to use STRAPI_PORT (NOT Hostinger's port, which our proxy already holds)
+process.env.PORT = String(STRAPI_PORT);
+process.env.HOST = '0.0.0.0';
 
-// ── Step 1: Start a keep-alive HTTP server IMMEDIATELY ──────────────────────
-// This ensures Hostinger's proxy always has something to connect to.
-// Once Strapi starts successfully, it takes over the actual API serving.
-const keepAliveServer = http.createServer((req, res) => {
-    if (strapiStarted) {
-        // Strapi took over - this server should not be handling requests anymore
-        res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end('Port conflict: Strapi started but port was not released.');
+let statusMessage = '⏳ Strapi is starting... please refresh in 30-60 seconds.';
+console.log('Proxy port:', PROXY_PORT, '| Strapi internal port:', STRAPI_PORT);
+
+// ─── Proxy Server (always alive on Hostinger's PORT) ───────────────────────
+const proxyServer = http.createServer((clientReq, clientRes) => {
+    const proxyOptions = {
+        hostname: '127.0.0.1',
+        port: STRAPI_PORT,
+        path: clientReq.url,
+        method: clientReq.method,
+        headers: { ...clientReq.headers, host: '127.0.0.1:' + STRAPI_PORT },
+    };
+
+    const proxyReq = http.request(proxyOptions, (proxyRes) => {
+        clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(clientRes, { end: true });
+    });
+
+    proxyReq.on('error', () => {
+        // Strapi not ready yet, or crashed — show status
+        clientRes.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        clientRes.end(statusMessage);
+    });
+
+    if (clientReq.method !== 'GET' && clientReq.method !== 'HEAD') {
+        clientReq.pipe(proxyReq, { end: true });
     } else {
-        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end(statusMessage);
+        proxyReq.end();
     }
 });
 
-keepAliveServer.listen(PORT, HOST, () => {
-    console.log('Keep-alive server listening on port', PORT);
-    // ── Step 2: Now try to load Strapi ──────────────────────────────────────
-    loadStrapi();
+// Handle WebSocket upgrades (needed for Strapi admin panel)
+proxyServer.on('upgrade', (req, socket, head) => {
+    const net = require('net');
+    const upstream = net.connect(STRAPI_PORT, '127.0.0.1', () => {
+        upstream.write(
+            'GET ' + req.url + ' HTTP/1.1\r\n' +
+            'Host: 127.0.0.1:' + STRAPI_PORT + '\r\n' +
+            'Upgrade: websocket\r\n' +
+            'Connection: Upgrade\r\n' +
+            (req.headers['sec-websocket-key'] ? 'Sec-WebSocket-Key: ' + req.headers['sec-websocket-key'] + '\r\n' : '') +
+            (req.headers['sec-websocket-version'] ? 'Sec-WebSocket-Version: ' + req.headers['sec-websocket-version'] + '\r\n' : '') +
+            '\r\n'
+        );
+    });
+    socket.pipe(upstream).pipe(socket);
+    upstream.on('error', () => socket.destroy());
+    socket.on('error', () => upstream.destroy());
 });
 
-// ── Step 3: Catch ANY unhandled async errors and show them ──────────────────
+// Start proxy FIRST — immediately, before anything else
+proxyServer.listen(PROXY_PORT, '0.0.0.0', () => {
+    console.log('✅ Proxy server listening on port', PROXY_PORT);
+    startStrapi(); // Only load Strapi after proxy is confirmed listening
+});
+
+// ─── Global error handlers (prevent process crash → 503) ───────────────────
 process.on('unhandledRejection', (reason) => {
     const msg = reason && reason.stack ? reason.stack : String(reason);
+    statusMessage = '❌ Strapi Async Error:\n\n' + msg;
     console.error('[unhandledRejection]', msg);
-    statusMessage = '⚠️ Strapi Async Error:\n\n' + msg;
 });
 
 process.on('uncaughtException', (err) => {
     const msg = err && err.stack ? err.stack : String(err);
+    statusMessage = '❌ Strapi Exception:\n\n' + msg;
     console.error('[uncaughtException]', msg);
-    statusMessage = '⚠️ Strapi Uncaught Error:\n\n' + msg;
 });
 
-// ── Prevent process.exit() from killing our keep-alive server ───────────────
-const _originalExit = process.exit;
-process.exit = function (code) {
-    statusMessage = '⚠️ Strapi called process.exit(' + code + '). ' +
-        'This usually means a fatal startup error. Check DATABASE env vars on Hostinger.';
-    console.error('[BLOCKED] process.exit(' + code + ')');
-    // Do NOT call _originalExit - keep the server alive to show the error
+// Intercept process.exit so our proxy server survives Strapi crashes
+process.exit = (code) => {
+    statusMessage =
+        '❌ Strapi called process.exit(' + code + ').\n\n' +
+        'This usually means a database connection failure.\n' +
+        'Please verify these env vars on Hostinger:\n' +
+        '  DATABASE_CLIENT=mysql\n' +
+        '  DATABASE_HOST=localhost\n' +
+        '  DATABASE_PORT=3306\n' +
+        '  DATABASE_NAME=u743540205_strapi\n' +
+        '  DATABASE_USERNAME=u743540205_strapi\n' +
+        '  DATABASE_PASSWORD=<your password>\n' +
+        '  NODE_ENV=production';
+    console.error('[BLOCKED process.exit(' + code + ')]');
+    // Intentionally NOT calling the real process.exit
 };
 
-async function loadStrapi() {
+// ─── Start Strapi on STRAPI_PORT ────────────────────────────────────────────
+async function startStrapi() {
     try {
-        // Use absolute path to avoid module resolution issues in Hostinger environment
         const strapiModule = require(path.join(appDir, 'node_modules', '@strapi', 'strapi'));
         const createStrapi = strapiModule.createStrapi;
 
         if (typeof createStrapi !== 'function') {
-            statusMessage = '⚠️ @strapi/strapi loaded but createStrapi is not a function. ' +
-                'Keys: ' + Object.keys(strapiModule).join(', ');
+            statusMessage =
+                '❌ createStrapi is not a function.\n' +
+                'Exported keys: ' + Object.keys(strapiModule).join(', ');
             return;
         }
 
-        // Close keep-alive server before Strapi tries to bind to the same port
-        keepAliveServer.close(() => {
-            console.log('Keep-alive server closed. Handing port to Strapi...');
-            strapiStarted = true;
-            createStrapi({
-                appDir: appDir,
-                distDir: path.join(appDir, 'dist'),
-            }).start().catch((err) => {
-                // Strapi's .start() rejected - restart keep-alive on error
-                statusMessage = '⚠️ Strapi .start() failed:\n\n' + (err && err.stack ? err.stack : String(err));
-                console.error('[Strapi .start() error]', statusMessage);
-                strapiStarted = false;
-                // Re-open keep-alive server to show the error
-                keepAliveServer.listen(PORT, HOST);
-            });
-        });
+        console.log('Loading Strapi on internal port', STRAPI_PORT, '...');
+        await createStrapi({
+            appDir: appDir,
+            distDir: path.join(appDir, 'dist'),
+        }).start();
+
+        statusMessage = '✅ Strapi is running on internal port ' + STRAPI_PORT;
+        console.log('✅ Strapi started on port', STRAPI_PORT);
 
     } catch (err) {
-        statusMessage = '⚠️ Failed to load Strapi module:\n\n' + (err && err.stack ? err.stack : String(err));
-        console.error('[loadStrapi catch]', statusMessage);
-        // Keep-alive server is still running and will show this error
+        statusMessage =
+            '❌ Strapi startup failed:\n\n' +
+            (err && err.stack ? err.stack : String(err));
+        console.error('[startStrapi error]', statusMessage);
     }
 }
