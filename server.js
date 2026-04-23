@@ -88,7 +88,18 @@ function startStrapiWorker() {
 
     const worker = fork(path.join(__dirname, 'strapi-runner.js'), [], {
         env,
-        silent: false, // Let child process output go to console
+        silent: true, // Capture stdout/stderr so we can show them in browser
+    });
+
+    // Pipe stdout to parent console
+    worker.stdout.on('data', (data) => process.stdout.write(data));
+
+    // Capture stderr — this contains the actual Strapi error
+    worker.stderr.on('data', (data) => {
+        const msg = data.toString();
+        process.stderr.write(msg);
+        // Accumulate stderr as lastError for display
+        lastError = (lastError + '\n' + msg).slice(-2000); // keep last 2000 chars
     });
 
     worker.on('message', (msg) => {
