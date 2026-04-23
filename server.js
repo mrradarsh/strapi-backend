@@ -1,2 +1,2 @@
 const { createStrapi } = require('@strapi/strapi');
-createStrapi().start();
+createStrapi({ distDir: './dist' }).start();
