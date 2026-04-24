@@ -1,58 +1,58 @@
 /**
- * strapi-runner.js - Runs Strapi in a child process.
- * Captures ALL errors (including process.exit calls) and reports to parent.
+ * strapi-runner.js — Child process that runs Strapi.
+ * All errors are written to strapi-error.log file (IPC may not work).
  */
 
 const path = require('path');
-const appDir = path.dirname(__filename);
+const fs = require('fs');
 
-// ── Intercept process.exit FIRST before anything else loads ─────────────────
+const appDir = path.dirname(__filename);
+const logFile = path.join(appDir, 'strapi-error.log');
+
+function writeLog(msg) {
+    const line = '[' + new Date().toISOString() + '] ' + msg + '\n';
+    process.stderr.write(line);
+    try {
+        fs.appendFileSync(logFile, line);
+    } catch (e) { /* ignore write errors */ }
+    try { process.send({ type: 'error', message: msg }); } catch (e) {}
+}
+
+// Clear log on new start
+try { fs.writeFileSync(logFile, '--- Strapi Runner Started: ' + new Date().toISOString() + ' ---\n'); } catch (e) {}
+
+// ── Intercept process.exit ───────────────────────────────────────────────────
 const _realExit = process.exit.bind(process);
 process.exit = (code) => {
-    // Send the captured error to parent before exiting
-    const msg = 'Strapi called process.exit(' + code + ').\n' +
-        'Last captured stderr is above in console.\n' +
-        'Most common causes:\n' +
-        '  1. Missing env var (APP_KEYS, ADMIN_JWT_SECRET, etc.)\n' +
-        '  2. MySQL connection refused (wrong host/password)\n' +
-        '  3. Out of memory';
-    try { process.send({ type: 'error', message: msg }); } catch(e) {}
-    setTimeout(() => _realExit(code || 1), 200);
+    writeLog('process.exit(' + code + ') was called — Strapi is shutting down.');
+    setTimeout(() => _realExit(code || 1), 300);
 };
 
 process.on('uncaughtException', (err) => {
-    const msg = 'uncaughtException: ' + (err && err.stack ? err.stack : String(err));
-    console.error('[strapi-runner]', msg);
-    try { process.send({ type: 'error', message: msg }); } catch(e) {}
+    writeLog('uncaughtException: ' + (err && err.stack ? err.stack : String(err)));
     _realExit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
-    const msg = 'unhandledRejection: ' + (reason && reason.stack ? reason.stack : String(reason));
-    console.error('[strapi-runner]', msg);
-    try { process.send({ type: 'error', message: msg }); } catch(e) {}
+    writeLog('unhandledRejection: ' + (reason && reason.stack ? reason.stack : String(reason)));
     _realExit(1);
 });
 
-// ── Log all env vars (redacted) so we can verify they exist ─────────────────
-const requiredEnvVars = [
-    'NODE_ENV', 'PORT', 'HOST',
+// ── Check required env vars ──────────────────────────────────────────────────
+const required = [
     'DATABASE_CLIENT', 'DATABASE_HOST', 'DATABASE_PORT',
     'DATABASE_NAME', 'DATABASE_USERNAME', 'DATABASE_PASSWORD',
     'APP_KEYS', 'API_TOKEN_SALT', 'ADMIN_JWT_SECRET',
     'TRANSFER_TOKEN_SALT', 'JWT_SECRET',
 ];
+const missing = required.filter(v => !process.env[v]);
 
-const missingVars = requiredEnvVars.filter(v => !process.env[v]);
-if (missingVars.length > 0) {
-    const msg = 'MISSING REQUIRED ENV VARS: ' + missingVars.join(', ') +
-        '\nPlease add these in Hostinger > Node.js App > Environment Variables';
-    console.error('[strapi-runner]', msg);
-    try { process.send({ type: 'error', message: msg }); } catch(e) {}
+if (missing.length > 0) {
+    writeLog('MISSING ENV VARS: ' + missing.join(', '));
     _realExit(1);
 }
 
-console.log('[strapi-runner] Env check passed. Starting Strapi on port', process.env.PORT);
+writeLog('Env check OK. Starting Strapi on port ' + process.env.PORT + '...');
 
 // ── Start Strapi ─────────────────────────────────────────────────────────────
 async function run() {
@@ -62,12 +62,12 @@ async function run() {
             appDir: appDir,
             distDir: path.join(appDir, 'dist'),
         }).start();
-        process.send({ type: 'ready', port: process.env.PORT });
-        console.log('[strapi-runner] Strapi started on port', process.env.PORT);
+
+        writeLog('Strapi started successfully on port ' + process.env.PORT);
+        try { process.send({ type: 'ready' }); } catch (e) {}
+
     } catch (err) {
-        const msg = 'Strapi .start() threw: ' + (err && err.stack ? err.stack : String(err));
-        console.error('[strapi-runner]', msg);
-        try { process.send({ type: 'error', message: msg }); } catch(e) {}
+        writeLog('Strapi .start() failed: ' + (err && err.stack ? err.stack : String(err)));
         _realExit(1);
     }
 }
