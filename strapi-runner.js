@@ -52,11 +52,41 @@ if (missing.length > 0) {
     _realExit(1);
 }
 
-writeLog('Env check OK. Starting Strapi on port ' + process.env.PORT + '...');
+writeLog('Env check OK. Testing MySQL connection...');
+
+// ── Test MySQL before starting Strapi ─────────────────────────────────────────
+async function testMySQL() {
+    try {
+        const mysql = require(path.join(appDir, 'node_modules', 'mysql2', 'promise'));
+        const conn = await mysql.createConnection({
+            host: process.env.DATABASE_HOST,
+            port: parseInt(process.env.DATABASE_PORT || '3306', 10),
+            database: process.env.DATABASE_NAME,
+            user: process.env.DATABASE_USERNAME,
+            password: process.env.DATABASE_PASSWORD,
+            connectTimeout: 10000,
+        });
+        await conn.ping();
+        await conn.end();
+        writeLog('✅ MySQL connection OK!');
+        return true;
+    } catch (err) {
+        writeLog('❌ MySQL connection FAILED: ' + err.message + ' (code: ' + err.code + ')');
+        return false;
+    }
+}
 
 // ── Start Strapi ─────────────────────────────────────────────────────────────
 async function run() {
-    try {
+    const dbOk = await testMySQL();
+    if (!dbOk) {
+        writeLog('Aborting Strapi start due to MySQL failure. Check DATABASE_* env vars on Hostinger.');
+        _realExit(1);
+        return;
+    }
+
+    writeLog('Starting Strapi on port ' + process.env.PORT + '...');
+
         const { createStrapi } = require(path.join(appDir, 'node_modules', '@strapi', 'strapi'));
         await createStrapi({
             appDir: appDir,
