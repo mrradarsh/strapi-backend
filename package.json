@@ -22,7 +22,12 @@
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
     "react-router-dom": "^6.0.0",
-    "styled-components": "^6.0.0"
+    "styled-components": "^6.0.0",
+    "object-keys": "1.1.1",
+    "define-properties": "1.2.1",
+    "has-property-descriptors": "1.0.2",
+    "globalthis": "1.0.4",
+    "global-agent": "3.0.0"
   },
   "devDependencies": {
     "@types/node": "^20",
