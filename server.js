@@ -1,41 +1,47 @@
 /**
- * server.js — Hostinger Entry Point
- * Proxy on Hostinger's PORT + Strapi child on PORT+1 with auto-restart.
+ * server.js — Hostinger Entry Point for Strapi v5
+ * Uses spawn() + /tmp logging + port polling (most compatible approach)
  */
 
 const http = require('http');
-const path = require('path');
 const fs = require('fs');
-const { fork } = require('child_process');
+const path = require('path');
+const { spawn } = require('child_process');
 
 const appDir = __dirname;
 const PROXY_PORT = parseInt(process.env.PORT || '1337', 10);
 const STRAPI_PORT = PROXY_PORT + 1;
-const LOG_FILE = path.join(appDir, 'strapi-error.log');
+const LOG_FILE = '/tmp/strapi-error.log';
 
 let strapiReady = false;
 let statusMessage = '⏳ Strapi is starting... please wait 60 seconds and refresh.';
 let restartCount = 0;
+let workerProcess = null;
 
-console.log('[server.js] Proxy:', PROXY_PORT, '| Strapi:', STRAPI_PORT);
+log('server.js started | Proxy:' + PROXY_PORT + ' | Strapi:' + STRAPI_PORT);
+
+function log(msg) {
+    const line = '[' + new Date().toISOString() + '] ' + msg;
+    console.log(line);
+    try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch (e) {}
+}
 
 function readLog() {
-    try { return fs.readFileSync(LOG_FILE, 'utf8'); } catch (e) { return '(no log file yet)'; }
+    try { return fs.readFileSync(LOG_FILE, 'utf8'); } catch (e) { return '(log unavailable: ' + e.message + ')'; }
 }
 
 // ─── Proxy Server ─────────────────────────────────────────────────────────────
 const proxyServer = http.createServer((clientReq, clientRes) => {
     if (!strapiReady) {
-        const logContent = readLog();
         clientRes.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
         clientRes.end(
             statusMessage + (restartCount > 0 ? ' [restarts: ' + restartCount + ']' : '') +
-            '\n\n=== strapi-error.log ===\n' + logContent
+            '\n\n=== /tmp/strapi-error.log ===\n' + readLog()
         );
         return;
     }
 
-    const options = {
+    const opts = {
         hostname: '127.0.0.1',
         port: STRAPI_PORT,
         path: clientReq.url,
@@ -43,7 +49,7 @@ const proxyServer = http.createServer((clientReq, clientRes) => {
         headers: { ...clientReq.headers, host: '127.0.0.1:' + STRAPI_PORT },
     };
 
-    const proxyReq = http.request(options, (proxyRes) => {
+    const proxyReq = http.request(opts, (proxyRes) => {
         const headers = { ...proxyRes.headers };
         if (headers.location) {
             headers.location = headers.location
@@ -56,9 +62,10 @@ const proxyServer = http.createServer((clientReq, clientRes) => {
 
     proxyReq.on('error', (err) => {
         strapiReady = false;
-        statusMessage = '⚠️ Proxy error: ' + err.message + ' — restarting Strapi in 10s...';
+        statusMessage = '⚠️ Strapi not responding (' + err.code + '). Checking...';
         clientRes.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        clientRes.end(statusMessage + '\n\n=== strapi-error.log ===\n' + readLog());
+        clientRes.end(statusMessage + '\n\n=== /tmp/strapi-error.log ===\n' + readLog());
+        checkStrapiAlive();
     });
 
     if (!['GET', 'HEAD'].includes(clientReq.method)) {
@@ -69,16 +76,18 @@ const proxyServer = http.createServer((clientReq, clientRes) => {
 });
 
 proxyServer.listen(PROXY_PORT, '0.0.0.0', () => {
-    console.log('[server.js] Proxy listening on', PROXY_PORT);
-    startWorker();
+    log('Proxy listening on ' + PROXY_PORT);
+    startStrapi();
 });
 
-// ─── Error guards for main process ──────────────────────────────────────────
-process.on('uncaughtException', (err) => console.error('[main uncaughtException]', err));
-process.on('unhandledRejection', (r) => console.error('[main unhandledRejection]', r));
+process.on('uncaughtException', (err) => log('main uncaughtException: ' + err.message));
+process.on('unhandledRejection', (r) => log('main unhandledRejection: ' + r));
 
-// ─── Worker Manager ───────────────────────────────────────────────────────────
-function startWorker() {
+// ─── Start Strapi via spawn ──────────────────────────────────────────────────
+function startStrapi() {
+    // Clear old log on fresh start
+    try { fs.writeFileSync(LOG_FILE, '=== Strapi start attempt at ' + new Date().toISOString() + ' ===\n'); } catch (e) {}
+
     const env = {
         ...process.env,
         PORT: String(STRAPI_PORT),
@@ -86,34 +95,67 @@ function startWorker() {
         NODE_ENV: process.env.NODE_ENV || 'production',
     };
 
-    const worker = fork(path.join(appDir, 'strapi-runner.js'), [], {
+    log('Spawning Strapi on port ' + STRAPI_PORT);
+
+    workerProcess = spawn(process.execPath, [path.join(appDir, 'strapi-runner.js')], {
         env,
-        silent: true,
+        cwd: appDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    worker.stdout.on('data', (d) => process.stdout.write(d));
-    worker.stderr.on('data', (d) => process.stderr.write(d));
-
-    worker.on('message', (msg) => {
-        if (msg.type === 'ready') {
-            strapiReady = true;
-            statusMessage = '✅ Strapi is running.';
-            console.log('[server.js] Strapi ready');
-        }
+    workerProcess.stdout.on('data', (d) => {
+        const msg = d.toString().trim();
+        if (msg) log('[strapi-out] ' + msg);
     });
 
-    worker.on('exit', (code, signal) => {
+    workerProcess.stderr.on('data', (d) => {
+        const msg = d.toString().trim();
+        if (msg) log('[strapi-err] ' + msg);
+    });
+
+    workerProcess.on('error', (err) => {
+        log('Failed to spawn Strapi: ' + err.message);
+        statusMessage = '❌ Could not start Strapi: ' + err.message;
+    });
+
+    workerProcess.on('exit', (code, signal) => {
         strapiReady = false;
         restartCount++;
-        const reason = signal || ('code ' + code);
-        statusMessage = '⏳ Strapi stopped (' + reason + '). Restarting in 60s... [attempt ' + restartCount + ']';
-        console.log('[server.js] Worker exited:', reason, '| Restart in 60s');
-        // 60 second delay to avoid rapid restart loop
-        setTimeout(startWorker, 60000);
+        const reason = signal ? 'signal ' + signal : 'code ' + code;
+        log('Strapi exited: ' + reason + ' | restart #' + restartCount + ' in 60s');
+        statusMessage = '⏳ Strapi stopped (' + reason + '). Restart #' + restartCount + ' in 60s...';
+        setTimeout(startStrapi, 60000);
     });
 
-    worker.on('error', (err) => {
-        statusMessage = '❌ Could not fork worker: ' + err.message;
-        console.error('[server.js] Fork error:', err);
+    // Poll for Strapi readiness (instead of IPC)
+    setTimeout(pollStrapiReady, 10000);
+}
+
+// ─── Poll to check if Strapi is actually listening ───────────────────────────
+function pollStrapiReady() {
+    if (strapiReady) return;
+    if (!workerProcess || workerProcess.killed) return;
+
+    const req = http.request(
+        { hostname: '127.0.0.1', port: STRAPI_PORT, path: '/', method: 'HEAD', timeout: 5000 },
+        (res) => {
+            strapiReady = true;
+            statusMessage = '✅ Strapi is running!';
+            log('Strapi is ready on port ' + STRAPI_PORT);
+        }
+    );
+    req.on('error', () => {
+        // Not ready yet — try again in 5 seconds
+        setTimeout(pollStrapiReady, 5000);
     });
+    req.on('timeout', () => {
+        req.destroy();
+        setTimeout(pollStrapiReady, 5000);
+    });
+    req.end();
+}
+
+// ─── Check if Strapi is still alive after a proxy error ─────────────────────
+function checkStrapiAlive() {
+    setTimeout(pollStrapiReady, 2000);
 }
