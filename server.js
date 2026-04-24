@@ -1,161 +1,85 @@
 /**
- * server.js — Hostinger Entry Point for Strapi v5
- * Uses spawn() + /tmp logging + port polling (most compatible approach)
+ * server.js — Hostinger Entry Point
+ * 1. Temp server starts immediately on PORT (prevents 503 timeout)
+ * 2. strapi.load() runs in background (30-60s)
+ * 3. Temp server closes, Strapi takes over the SAME port
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
 
 const appDir = __dirname;
-const PROXY_PORT = parseInt(process.env.PORT || '1337', 10);
-const STRAPI_PORT = PROXY_PORT + 1;
+const PORT = parseInt(process.env.PORT || '1337', 10);
 const LOG_FILE = '/tmp/strapi-error.log';
 
-let strapiReady = false;
-let statusMessage = '⏳ Strapi is starting... please wait 60 seconds and refresh.';
-let restartCount = 0;
-let workerProcess = null;
+let statusMessage = '⏳ Strapi is loading... please wait 60 seconds and refresh.';
 
-log('server.js started | Proxy:' + PROXY_PORT + ' | Strapi:' + STRAPI_PORT);
+try { fs.writeFileSync(LOG_FILE, '=== started ' + new Date().toISOString() + ' ===\n'); } catch (e) {}
 
 function log(msg) {
     const line = '[' + new Date().toISOString() + '] ' + msg;
     console.log(line);
     try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch (e) {}
 }
-
 function readLog() {
-    try { return fs.readFileSync(LOG_FILE, 'utf8'); } catch (e) { return '(log unavailable: ' + e.message + ')'; }
+    try { return fs.readFileSync(LOG_FILE, 'utf8'); } catch (e) { return '(log: ' + e.message + ')'; }
 }
 
-// ─── Proxy Server ─────────────────────────────────────────────────────────────
-const proxyServer = http.createServer((clientReq, clientRes) => {
-    if (!strapiReady) {
-        clientRes.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        clientRes.end(
-            statusMessage + (restartCount > 0 ? ' [restarts: ' + restartCount + ']' : '') +
-            '\n\n=== /tmp/strapi-error.log ===\n' + readLog()
-        );
-        return;
-    }
+// Intercept process.exit so we can log before dying
+const _realExit = process.exit.bind(process);
+process.exit = (code) => {
+    log('process.exit(' + code + ') called');
+    statusMessage = '❌ Strapi exited (code ' + code + '). See log.';
+    setTimeout(() => _realExit(code || 1), 500);
+};
+process.on('uncaughtException', (err) => log('uncaughtException: ' + (err.stack || err)));
+process.on('unhandledRejection', (r) => log('unhandledRejection: ' + r));
 
-    const opts = {
-        hostname: '127.0.0.1',
-        port: STRAPI_PORT,
-        path: clientReq.url,
-        method: clientReq.method,
-        headers: { ...clientReq.headers, host: '127.0.0.1:' + STRAPI_PORT },
-    };
-
-    const proxyReq = http.request(opts, (proxyRes) => {
-        const headers = { ...proxyRes.headers };
-        if (headers.location) {
-            headers.location = headers.location
-                .replace(/http:\/\/127\.0\.0\.1:\d+/g, 'https://api.marathibusinesstribe.com')
-                .replace(/http:\/\/localhost:\d+/g, 'https://api.marathibusinesstribe.com');
-        }
-        clientRes.writeHead(proxyRes.statusCode, headers);
-        proxyRes.pipe(clientRes, { end: true });
-    });
-
-    proxyReq.on('error', (err) => {
-        strapiReady = false;
-        statusMessage = '⚠️ Strapi not responding (' + err.code + '). Checking...';
-        clientRes.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        clientRes.end(statusMessage + '\n\n=== /tmp/strapi-error.log ===\n' + readLog());
-        checkStrapiAlive();
-    });
-
-    if (!['GET', 'HEAD'].includes(clientReq.method)) {
-        clientReq.pipe(proxyReq, { end: true });
-    } else {
-        proxyReq.end();
-    }
+// ── Step 1: Temp server binds PORT immediately ────────────────────────────────
+const tempServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(statusMessage + '\n\n=== /tmp/strapi-error.log ===\n' + readLog());
 });
 
-proxyServer.listen(PROXY_PORT, '0.0.0.0', () => {
-    log('Proxy listening on ' + PROXY_PORT);
-    startStrapi();
+tempServer.listen(PORT, '0.0.0.0', () => {
+    log('Temp server listening on port ' + PORT);
+    loadAndSwitch();
 });
 
-process.on('uncaughtException', (err) => log('main uncaughtException: ' + err.message));
-process.on('unhandledRejection', (r) => log('main unhandledRejection: ' + r));
+// ── Step 2: Load Strapi, then hand off port ───────────────────────────────────
+async function loadAndSwitch() {
+    try {
+        process.env.HOST = '0.0.0.0';
+        // PORT stays same — Strapi will listen on it after temp server closes
 
-// ─── Start Strapi via spawn ──────────────────────────────────────────────────
-function startStrapi() {
-    // Clear old log on fresh start
-    try { fs.writeFileSync(LOG_FILE, '=== Strapi start attempt at ' + new Date().toISOString() + ' ===\n'); } catch (e) {}
+        const strapiPkg = require(path.join(appDir, 'node_modules', '@strapi', 'strapi'));
+        const createStrapi = strapiPkg.createStrapi || strapiPkg.default?.createStrapi || strapiPkg;
 
-    const env = {
-        ...process.env,
-        PORT: String(STRAPI_PORT),
-        HOST: '0.0.0.0',
-        NODE_ENV: process.env.NODE_ENV || 'production',
-    };
+        const strapi = createStrapi({ appDir, distDir: path.join(appDir, 'dist') });
 
-    log('Spawning Strapi on port ' + STRAPI_PORT);
+        log('strapi.load() starting...');
+        statusMessage = '⏳ Strapi initializing (up to 60s)... please refresh.';
+        await strapi.load();
+        log('strapi.load() complete. Switching port...');
 
-    workerProcess = spawn(process.execPath, [path.join(appDir, 'strapi-runner.js')], {
-        env,
-        cwd: appDir,
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
+        // ── Step 3: Close temp server → Strapi takes over PORT ──────────────
+        if (tempServer.closeAllConnections) tempServer.closeAllConnections();
 
-    workerProcess.stdout.on('data', (d) => {
-        const msg = d.toString().trim();
-        if (msg) log('[strapi-out] ' + msg);
-    });
+        tempServer.close(async () => {
+            log('Temp server closed. Starting Strapi on port ' + PORT);
+            try {
+                // strapi.isLoaded = true, so start() skips load() and only calls server.listen()
+                await strapi.start();
+                log('✅ Strapi is live on port ' + PORT);
+            } catch (err) {
+                log('strapi.start() failed: ' + (err.stack || err.message));
+                statusMessage = '❌ ' + err.message;
+            }
+        });
 
-    workerProcess.stderr.on('data', (d) => {
-        const msg = d.toString().trim();
-        if (msg) log('[strapi-err] ' + msg);
-    });
-
-    workerProcess.on('error', (err) => {
-        log('Failed to spawn Strapi: ' + err.message);
-        statusMessage = '❌ Could not start Strapi: ' + err.message;
-    });
-
-    workerProcess.on('exit', (code, signal) => {
-        strapiReady = false;
-        restartCount++;
-        const reason = signal ? 'signal ' + signal : 'code ' + code;
-        log('Strapi exited: ' + reason + ' | restart #' + restartCount + ' in 60s');
-        statusMessage = '⏳ Strapi stopped (' + reason + '). Restart #' + restartCount + ' in 60s...';
-        setTimeout(startStrapi, 60000);
-    });
-
-    // Poll for Strapi readiness (instead of IPC)
-    setTimeout(pollStrapiReady, 10000);
-}
-
-// ─── Poll to check if Strapi is actually listening ───────────────────────────
-function pollStrapiReady() {
-    if (strapiReady) return;
-    if (!workerProcess || workerProcess.killed) return;
-
-    const req = http.request(
-        { hostname: '127.0.0.1', port: STRAPI_PORT, path: '/', method: 'HEAD', timeout: 5000 },
-        (res) => {
-            strapiReady = true;
-            statusMessage = '✅ Strapi is running!';
-            log('Strapi is ready on port ' + STRAPI_PORT);
-        }
-    );
-    req.on('error', () => {
-        // Not ready yet — try again in 5 seconds
-        setTimeout(pollStrapiReady, 5000);
-    });
-    req.on('timeout', () => {
-        req.destroy();
-        setTimeout(pollStrapiReady, 5000);
-    });
-    req.end();
-}
-
-// ─── Check if Strapi is still alive after a proxy error ─────────────────────
-function checkStrapiAlive() {
-    setTimeout(pollStrapiReady, 2000);
+    } catch (err) {
+        log('loadAndSwitch error: ' + (err.stack || err.message));
+        statusMessage = '❌ Load failed: ' + err.message;
+    }
 }
