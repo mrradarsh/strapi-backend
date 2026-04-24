@@ -1,85 +1,62 @@
-/**
- * server.js — Hostinger Entry Point
- * 1. Temp server starts immediately on PORT (prevents 503 timeout)
- * 2. strapi.load() runs in background (30-60s)
- * 3. Temp server closes, Strapi takes over the SAME port
- */
-
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const appDir = __dirname;
 const PORT = parseInt(process.env.PORT || '1337', 10);
-const LOG_FILE = '/tmp/strapi-error.log';
+const SOCK = '/tmp/strapi.sock';
+const LOG = '/tmp/strapi-error.log';
 
-let statusMessage = '⏳ Strapi is loading... please wait 60 seconds and refresh.';
+let ready = false, restarts = 0;
+let status = '⏳ Starting Strapi... refresh in 90 seconds.';
 
-try { fs.writeFileSync(LOG_FILE, '=== started ' + new Date().toISOString() + ' ===\n'); } catch (e) {}
+try { fs.writeFileSync(LOG, '=== ' + new Date().toISOString() + ' ===\n'); } catch(e){}
 
-function log(msg) {
-    const line = '[' + new Date().toISOString() + '] ' + msg;
-    console.log(line);
-    try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch (e) {}
+function log(m) {
+    const l = '[' + new Date().toISOString() + '] ' + m + '\n';
+    process.stdout.write(l);
+    try { fs.appendFileSync(LOG, l); } catch(e){}
 }
-function readLog() {
-    try { return fs.readFileSync(LOG_FILE, 'utf8'); } catch (e) { return '(log: ' + e.message + ')'; }
-}
+function readLog() { try { return fs.readFileSync(LOG,'utf8'); } catch(e){ return e.message; } }
 
-// Intercept process.exit so we can log before dying
-const _realExit = process.exit.bind(process);
-process.exit = (code) => {
-    log('process.exit(' + code + ') called');
-    statusMessage = '❌ Strapi exited (code ' + code + '). See log.';
-    setTimeout(() => _realExit(code || 1), 500);
-};
-process.on('uncaughtException', (err) => log('uncaughtException: ' + (err.stack || err)));
-process.on('unhandledRejection', (r) => log('unhandledRejection: ' + r));
-
-// ── Step 1: Temp server binds PORT immediately ────────────────────────────────
-const tempServer = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end(statusMessage + '\n\n=== /tmp/strapi-error.log ===\n' + readLog());
-});
-
-tempServer.listen(PORT, '0.0.0.0', () => {
-    log('Temp server listening on port ' + PORT);
-    loadAndSwitch();
-});
-
-// ── Step 2: Load Strapi, then hand off port ───────────────────────────────────
-async function loadAndSwitch() {
-    try {
-        process.env.HOST = '0.0.0.0';
-        // PORT stays same — Strapi will listen on it after temp server closes
-
-        const strapiPkg = require(path.join(appDir, 'node_modules', '@strapi', 'strapi'));
-        const createStrapi = strapiPkg.createStrapi || strapiPkg.default?.createStrapi || strapiPkg;
-
-        const strapi = createStrapi({ appDir, distDir: path.join(appDir, 'dist') });
-
-        log('strapi.load() starting...');
-        statusMessage = '⏳ Strapi initializing (up to 60s)... please refresh.';
-        await strapi.load();
-        log('strapi.load() complete. Switching port...');
-
-        // ── Step 3: Close temp server → Strapi takes over PORT ──────────────
-        if (tempServer.closeAllConnections) tempServer.closeAllConnections();
-
-        tempServer.close(async () => {
-            log('Temp server closed. Starting Strapi on port ' + PORT);
-            try {
-                // strapi.isLoaded = true, so start() skips load() and only calls server.listen()
-                await strapi.start();
-                log('✅ Strapi is live on port ' + PORT);
-            } catch (err) {
-                log('strapi.start() failed: ' + (err.stack || err.message));
-                statusMessage = '❌ ' + err.message;
-            }
-        });
-
-    } catch (err) {
-        log('loadAndSwitch error: ' + (err.stack || err.message));
-        statusMessage = '❌ Load failed: ' + err.message;
+// Proxy: TCP PORT → UNIX socket
+const proxy = http.createServer((req, res) => {
+    if (!ready) {
+        res.writeHead(200,{'Content-Type':'text/plain;charset=utf-8'});
+        return res.end(status + '\n\n=== LOG ===\n' + readLog());
     }
+    const p = http.request({ socketPath: SOCK, path: req.url, method: req.method, headers: req.headers }, (r) => {
+        res.writeHead(r.statusCode, r.headers);
+        r.pipe(res, {end:true});
+    });
+    p.on('error', (e) => {
+        ready = false;
+        status = '⚠️ Strapi error: ' + e.message;
+        res.writeHead(200,{'Content-Type':'text/plain'});
+        res.end(status);
+    });
+    if (!['GET','HEAD'].includes(req.method)) req.pipe(p,{end:true}); else p.end();
+});
+
+proxy.listen(PORT, '0.0.0.0', () => { log('Proxy on PORT ' + PORT); startWorker(); });
+process.on('uncaughtException', e => log('ERR: ' + e.stack));
+process.on('unhandledRejection', r => log('REJ: ' + r));
+
+function startWorker() {
+    try { fs.unlinkSync(SOCK); } catch(e){}
+    ready = false;
+    restarts++;
+    status = '⏳ Strapi loading... (attempt ' + restarts + ') refresh in 90s.';
+    log('Spawning strapi-runner (attempt ' + restarts + ')');
+
+    const w = spawn(process.execPath, [path.join(appDir,'strapi-runner.js')], {
+        env: { ...process.env, STRAPI_SOCK: SOCK, NODE_ENV: process.env.NODE_ENV||'production' },
+        cwd: appDir,
+        stdio: ['ignore','pipe','pipe']
+    });
+    w.stdout.on('data', d => { const m = d.toString().trim(); log('[out] ' + m); if (m.includes('READY')) { ready=true; status='✅ Strapi running!'; } });
+    w.stderr.on('data', d => log('[err] ' + d.toString().trim()));
+    w.on('error', e => { status='❌ Spawn failed: '+e.message; log(status); });
+    w.on('exit', (c,s) => { ready=false; log('Worker exit: '+(s||c)+' | restart in 60s'); status='⏳ Restarting ('+restarts+')...'; setTimeout(startWorker,60000); });
 }
