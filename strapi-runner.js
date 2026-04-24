@@ -24,18 +24,20 @@ mysql.createConnection({
     const { createStrapi } = require(path.join(appDir,'node_modules','@strapi','strapi'));
     const strapi = createStrapi({ appDir, distDir: path.join(appDir,'dist') });
 
-    // Patch Strapi to listen on UNIX socket instead of TCP port
-    const origListen = strapi.server.listen.bind(strapi.server);
-    strapi.server.listen = async () => {
+    // Patch the RAW httpServer.listen so all Strapi setup (admin panel, routes) still runs
+    // We only redirect the TCP port binding to a UNIX socket
+    const httpServer = strapi.server.httpServer;
+    const origListen = httpServer.listen.bind(httpServer);
+    httpServer.listen = function(port, host, cb) {
         try { fs.unlinkSync(SOCK); } catch(e){}
-        await new Promise((res, rej) => {
-            strapi.server.httpServer.listen(SOCK, (err) => { if(err) rej(err); else res(); });
-        });
-        try { fs.chmodSync(SOCK, '777'); } catch(e){}
-        console.log('[runner] READY on socket:', SOCK);
+        console.log('[runner] Redirecting listen to UNIX socket:', SOCK, '(was port:', port + ')');
+        return origListen(SOCK, cb);
     };
 
     await strapi.start();
+    try { fs.chmodSync(SOCK, '777'); } catch(e){}
+    console.log('[runner] READY');
+
 }).catch(err => {
     console.error('[runner] FAILED:', err.message);
     process.exit(1);
