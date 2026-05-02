@@ -37,4 +37,7 @@ Data integrity is paramount. This system is fortified with:
 <div align="center">
   <p><i>Engineered for Scale. Designed for Growth.</i></p>
   <b>Marathi Business Tribe 🚀</b>
+  <br/><br/>
+  <p>⚡ <b>Architected & Forged by <a href="https://github.com/mrradarsh">Adarsh</a></b></p>
+  <p><i>"Turning complex logic into seamless digital experiences."</i></p>
 </div>
