@@ -15,19 +15,20 @@
     "upgrade:dry": "npx @strapi/upgrade latest --dry"
   },
   "dependencies": {
-    "@strapi/plugin-cloud": "5.43.0",
-    "@strapi/plugin-users-permissions": "5.43.0",
-    "@strapi/strapi": "5.43.0",
+    "@strapi/plugin-cloud": "5.44.0",
+    "@strapi/plugin-users-permissions": "5.44.0",
+    "@strapi/strapi": "5.44.0",
+    "better-sqlite3": "^12.9.0",
+    "define-properties": "1.2.1",
+    "global-agent": "3.0.0",
+    "globalthis": "1.0.4",
+    "has-property-descriptors": "1.0.2",
     "mysql2": "^3.22.2",
+    "object-keys": "1.1.1",
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
     "react-router-dom": "^6.0.0",
-    "styled-components": "^6.0.0",
-    "object-keys": "1.1.1",
-    "define-properties": "1.2.1",
-    "has-property-descriptors": "1.0.2",
-    "globalthis": "1.0.4",
-    "global-agent": "3.0.0"
+    "styled-components": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^20",
