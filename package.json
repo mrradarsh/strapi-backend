@@ -18,7 +18,6 @@
     "@strapi/plugin-cloud": "5.44.0",
     "@strapi/plugin-users-permissions": "5.44.0",
     "@strapi/strapi": "5.44.0",
-    "better-sqlite3": "^12.9.0",
     "define-properties": "1.2.1",
     "global-agent": "3.0.0",
     "globalthis": "1.0.4",
@@ -43,5 +42,8 @@
   "strapi": {
     "uuid": "13ed7edf-6a30-4711-b946-21c5d82d0a67",
     "installId": "a5cee3a49ec4aef7fb2ab3fa1f2f5519003f52fc6564d72f1fcaeb3fc9b380f2"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.9.0"
   }
 }
