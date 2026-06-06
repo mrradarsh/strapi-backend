@@ -1,0 +1,68 @@
+name: Auto Strapi Update
+
+on:
+  workflow_dispatch:
+    inputs:
+      track:
+        description: "Strapi upgrade track"
+        required: true
+        default: minor
+        type: choice
+        options:
+          - patch
+          - minor
+          - latest
+  schedule:
+    - cron: "30 2 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      UPGRADE_TRACK: ${{ github.event.inputs.track || 'minor' }}
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=optional
+
+      - name: Upgrade Strapi
+        run: npx @strapi/upgrade "$UPGRADE_TRACK" --yes
+
+      - name: Rebuild Strapi admin
+        run: npx strapi build
+
+      - name: Verify Strapi packages
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          console.log({
+            strapi: pkg.dependencies['@strapi/strapi'],
+            usersPermissions: pkg.dependencies['@strapi/plugin-users-permissions'],
+            cloud: pkg.dependencies['@strapi/plugin-cloud'],
+          });
+          NODE
+
+      - name: Commit upgrade
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "Strapi is already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json .strapi-updater.json .strapi dist src types config public server.js strapi-runner.js tsconfig.json README.md
+          git commit -m "Auto-update Strapi"
+          git push

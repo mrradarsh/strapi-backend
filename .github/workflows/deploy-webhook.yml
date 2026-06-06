@@ -1,0 +1,23 @@
+name: Deploy Webhook
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
+
+    steps:
+      - name: Trigger deployment
+        run: |
+          if [ -z "$DEPLOY_WEBHOOK_URL" ]; then
+            echo "DEPLOY_WEBHOOK_URL secret is not set. Skipping deploy trigger."
+            exit 0
+          fi
+
+          curl -fsS -X POST "$DEPLOY_WEBHOOK_URL"

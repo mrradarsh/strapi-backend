@@ -34,6 +34,14 @@ Data integrity is paramount. This system is fortified with:
 
 ---
 
+## GitHub Automation
+
+- **Strapi Updates:** `.github/workflows/auto-strapi-update.yml` checks for Strapi updates every Monday and can also be run manually. The scheduled job uses the `minor` track so it stays within Strapi v5 and avoids surprise major-version breaks.
+- **Content Safety:** The automation updates code, packages, and pre-built admin assets only. It does not run database imports, seed scripts, or content rewrites, so existing blog content stays in the database as-is.
+- **Auto Deploy:** `.github/workflows/deploy-webhook.yml` triggers a deployment webhook after pushes to `main`. Add your host's webhook URL as the GitHub secret `DEPLOY_WEBHOOK_URL`; if the secret is missing, the workflow safely skips deployment.
+
+---
+
 <div align="center">
   <p><i>Engineered for Scale. Designed for Growth.</i></p>
   <b>Marathi Business Tribe 🚀</b>

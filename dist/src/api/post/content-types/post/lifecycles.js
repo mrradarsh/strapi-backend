@@ -1,9 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const POST_UID = 'api::post.post';
-const pickStableUploadDate = (data, existingPost) => existingPost?.uploadDate ||
-    existingPost?.publishedAt ||
-    existingPost?.createdAt ||
+const pickStableUploadDate = (data, existingPost) => (existingPost === null || existingPost === void 0 ? void 0 : existingPost.uploadDate) ||
+    (existingPost === null || existingPost === void 0 ? void 0 : existingPost.publishedAt) ||
+    (existingPost === null || existingPost === void 0 ? void 0 : existingPost.createdAt) ||
     data.uploadDate ||
     data.publishedAt ||
     new Date().toISOString();
