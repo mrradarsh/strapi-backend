@@ -137,14 +137,47 @@ const shouldAttachImages = (options = {}) =>
 const withTabImages = async (tabBlogs, options = {}) => {
   if (!shouldAttachImages(options) || tabBlogs.length === 0) return tabBlogs;
 
+  const tabsWithLocalImages = await Promise.all(
+    tabBlogs.map(async (tabBlog) => ({
+      ...tabBlog,
+      image: (await getLocalTabImage(tabBlog.tab)) || tabBlog.image,
+    }))
+  );
+  const missingImages = tabsWithLocalImages.filter((tabBlog) => !tabBlog.image);
+
+  if (missingImages.length === 0) return tabsWithLocalImages;
+
   const docId = options.docId || process.env.BLOG_SOURCE_DOC_ID || DEFAULT_DOC_ID;
   const html = options.html || (await fetchGoogleDocHtml(docId));
   const resolveImage = createTabImageResolver(html);
 
-  return tabBlogs.map((tabBlog) => ({
+  return tabsWithLocalImages.map((tabBlog) => ({
     ...tabBlog,
-    image: resolveImage(tabBlog.tab),
+    image: tabBlog.image || resolveImage(tabBlog.tab),
   }));
+};
+
+const getLocalTabImage = async (tab) => {
+  const imageDir = process.env.BLOG_LOCAL_IMAGE_DIR || path.join(process.cwd(), 'scripts', 'blog-images');
+  const extensions = ['png', 'jpg', 'jpeg', 'webp'];
+
+  for (const extension of extensions) {
+    const filepath = path.join(imageDir, `tab-${tab}.${extension}`);
+
+    try {
+      await fs.access(filepath);
+
+      return {
+        filepath,
+        mimeType: extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : `image/${extension}`,
+        extension: extension === 'jpeg' ? 'jpg' : extension,
+        marker: `local tab-${tab}.${extension}`,
+      };
+    } catch {
+    }
+  }
+
+  return null;
 };
 
 const getImageExtension = (mimeType) => {
@@ -195,6 +228,22 @@ const sourceToImage = async (source) => {
   };
 };
 
+const getTabImageUploadData = async (tabBlog) => {
+  if (tabBlog.image?.filepath) {
+    const buffer = await fs.readFile(tabBlog.image.filepath);
+
+    return {
+      buffer,
+      mimeType: tabBlog.image.mimeType || 'image/png',
+      extension: tabBlog.image.extension || 'png',
+    };
+  }
+
+  if (tabBlog.image?.source) return sourceToImage(tabBlog.image.source);
+
+  return null;
+};
+
 const getExistingUploadedFile = async (strapi, filename) =>
   strapi.db.query(UPLOAD_FILE_UID).findOne({
     where: { name: filename },
@@ -202,9 +251,11 @@ const getExistingUploadedFile = async (strapi, filename) =>
   });
 
 const uploadCoverImage = async (strapi, tabBlog) => {
-  if (!tabBlog.image?.source) return null;
+  if (!tabBlog.image?.source && !tabBlog.image?.filepath) return null;
 
-  const image = await sourceToImage(tabBlog.image.source);
+  const image = await getTabImageUploadData(tabBlog);
+  if (!image) return null;
+
   const filename = `${tabBlog.slug || `tab-${tabBlog.tab}`}.${image.extension}`;
   const existingFile = await getExistingUploadedFile(strapi, filename);
 
@@ -304,7 +355,7 @@ const publishTabBlog = async (strapi, tabBlog, options = {}) => {
   const existingPost = await getExistingPost(strapi, tabBlog.slug);
 
   if (existingPost) {
-    if (!existingPost.coverImage?.id && shouldAttachImages(options) && tabBlog.image?.source) {
+    if (!existingPost.coverImage?.id && shouldAttachImages(options) && tabBlog.image) {
       const coverImage = await uploadCoverImage(strapi, tabBlog);
       await attachCoverImageToPost(strapi, existingPost, coverImage);
 
@@ -426,9 +477,11 @@ const runCli = async () => {
           title: tabBlog.title,
           slug: tabBlog.slug,
           paragraphs: tabBlog.content.length,
-          hasImage: Boolean(tabBlog.image?.source),
+          hasImage: Boolean(tabBlog.image?.source || tabBlog.image?.filepath),
           imageBytes: tabBlog.image?.source?.startsWith('data:')
             ? Buffer.byteLength(tabBlog.image.source.split(',')[1] || '', 'base64')
+            : tabBlog.image?.filepath
+              ? undefined
             : undefined,
         })),
         null,
