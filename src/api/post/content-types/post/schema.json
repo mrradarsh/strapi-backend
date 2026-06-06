@@ -24,6 +24,9 @@
     "content": {
       "type": "blocks"
     },
+    "uploadDate": {
+      "type": "datetime"
+    },
     "coverImage": {
       "type": "media",
       "multiple": false,
