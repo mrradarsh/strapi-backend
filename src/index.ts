@@ -1,4 +1,7 @@
-// import type { Core } from '@strapi/strapi';
+import path from 'path';
+
+const getGoogleDocPublisher = () =>
+  require(path.join(process.cwd(), 'scripts', 'google-doc-blog-publisher.cjs'));
 
 export default {
   /**
@@ -16,5 +19,22 @@ export default {
    * This gives you an opportunity to set up your data model,
    * run jobs, or perform some special logic.
    */
-  bootstrap(/* { strapi }: { strapi: Core.Strapi } */) {},
+  async bootstrap({ strapi }) {
+    const shouldCatchUp = process.env.BLOG_CATCH_UP_ON_BOOT !== 'false';
+
+    if (!shouldCatchUp) return;
+
+    try {
+      const { publishTabRange } = getGoogleDocPublisher();
+      const results = await publishTabRange(strapi, {
+        docId: process.env.BLOG_SOURCE_DOC_ID,
+        fromTab: Number(process.env.BLOG_CATCH_UP_FROM_TAB || 25),
+        toTab: Number(process.env.BLOG_CATCH_UP_TO_TAB || 30),
+      });
+
+      strapi.log.info(`[google-doc-blog-publisher] boot catch-up ${JSON.stringify(results)}`);
+    } catch (error) {
+      strapi.log.error('[google-doc-blog-publisher] boot catch-up failed', error);
+    }
+  },
 };
