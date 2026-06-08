@@ -145,7 +145,13 @@ const withTabImages = async (tabBlogs, options = {}) => {
   );
   const missingImages = tabsWithLocalImages.filter((tabBlog) => !tabBlog.image);
 
-  if (missingImages.length === 0) return tabsWithLocalImages;
+  if (
+    missingImages.length === 0 ||
+    options.fallbackToDocHtml === false ||
+    process.env.BLOG_USE_DOC_HTML_IMAGES === 'false'
+  ) {
+    return tabsWithLocalImages;
+  }
 
   const docId = options.docId || process.env.BLOG_SOURCE_DOC_ID || DEFAULT_DOC_ID;
   const html = options.html || (await fetchGoogleDocHtml(docId));
@@ -250,6 +256,25 @@ const getExistingUploadedFile = async (strapi, filename) =>
     select: ['id', 'name', 'url'],
   });
 
+const getLocalUploadPath = (file) => {
+  if (!file?.url || /^https?:\/\//i.test(file.url)) return null;
+
+  return path.join(process.cwd(), 'public', file.url.replace(/^\/+/, ''));
+};
+
+const uploadFileExists = async (file) => {
+  const filepath = getLocalUploadPath(file);
+
+  if (!filepath) return Boolean(file?.id);
+
+  try {
+    await fs.access(filepath);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const uploadCoverImage = async (strapi, tabBlog) => {
   if (!tabBlog.image?.source && !tabBlog.image?.filepath) return null;
 
@@ -259,7 +284,7 @@ const uploadCoverImage = async (strapi, tabBlog) => {
   const filename = `${tabBlog.slug || `tab-${tabBlog.tab}`}.${image.extension}`;
   const existingFile = await getExistingUploadedFile(strapi, filename);
 
-  if (existingFile) return existingFile;
+  if (existingFile && (await uploadFileExists(existingFile))) return existingFile;
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'khw-blog-image-'));
   const filepath = path.join(tmpDir, filename);
@@ -313,6 +338,18 @@ const getExistingPost = async (strapi, slug) =>
     },
   });
 
+const getExistingPostsByCreatedOrder = async (strapi, limit = 50) =>
+  strapi.db.query(POST_UID).findMany({
+    orderBy: { createdAt: 'asc' },
+    limit,
+    select: ['id', 'documentId', 'slug', 'title', 'publishedAt', 'uploadDate', 'createdAt'],
+    populate: {
+      coverImage: {
+        select: ['id', 'name', 'url'],
+      },
+    },
+  });
+
 const createPublishedPost = async (strapi, tabBlog, options = {}) => {
   const author = options.author || process.env.BLOG_DEFAULT_AUTHOR || 'Kiran Hajare';
   const publishedAt = options.publishedAt || new Date().toISOString();
@@ -352,10 +389,12 @@ const publishTabBlog = async (strapi, tabBlog, options = {}) => {
     };
   }
 
-  const existingPost = await getExistingPost(strapi, tabBlog.slug);
+  const existingPost = options.existingPost || (await getExistingPost(strapi, tabBlog.slug));
 
   if (existingPost) {
-    if (!existingPost.coverImage?.id && shouldAttachImages(options) && tabBlog.image) {
+    const hasWorkingCoverImage = await uploadFileExists(existingPost.coverImage);
+
+    if (!hasWorkingCoverImage && shouldAttachImages(options) && tabBlog.image) {
       const coverImage = await uploadCoverImage(strapi, tabBlog);
       await attachCoverImageToPost(strapi, existingPost, coverImage);
 
@@ -373,7 +412,17 @@ const publishTabBlog = async (strapi, tabBlog, options = {}) => {
       title: tabBlog.title,
       slug: tabBlog.slug,
       status: 'exists',
-      hasCoverImage: Boolean(existingPost.coverImage?.id),
+      hasCoverImage: hasWorkingCoverImage,
+    };
+  }
+
+  if (options.publishMissing === false) {
+    return {
+      tab: tabBlog.tab,
+      title: tabBlog.title,
+      slug: tabBlog.slug,
+      status: 'skipped',
+      reason: 'Post does not exist',
     };
   }
 
@@ -388,6 +437,33 @@ const publishTabBlog = async (strapi, tabBlog, options = {}) => {
     documentId: created?.documentId,
     coverImageId: coverImage?.id,
   };
+};
+
+const syncExistingTabImages = async (strapi, options = {}) => {
+  const docId = options.docId || process.env.BLOG_SOURCE_DOC_ID || DEFAULT_DOC_ID;
+  const fromTab = Number(options.fromTab || process.env.BLOG_SYNC_IMAGES_FROM_TAB || 1);
+  const toTab = Number(options.toTab || process.env.BLOG_SYNC_IMAGES_TO_TAB || 50);
+  const tabs = await getBlogTabs(docId);
+  const selectedTabs = await withTabImages(
+    tabs.filter((tabBlog) => tabBlog.tab >= fromTab && tabBlog.tab <= toTab),
+    { ...options, docId, fallbackToDocHtml: false }
+  );
+  const existingPosts = await getExistingPostsByCreatedOrder(strapi, toTab);
+  const results = [];
+
+  for (const tabBlog of selectedTabs) {
+    const existingPost = existingPosts[tabBlog.tab - 1] || (await getExistingPost(strapi, tabBlog.slug));
+
+    results.push(
+      await publishTabBlog(strapi, tabBlog, {
+        ...options,
+        existingPost,
+        publishMissing: false,
+      })
+    );
+  }
+
+  return results;
 };
 
 const publishTabRange = async (strapi, options = {}) => {
@@ -416,7 +492,7 @@ const publishNextTab = async (strapi, options = {}) => {
   for (const tabBlog of tabs) {
     const existingPost = await getExistingPost(strapi, tabBlog.slug);
 
-    if (!existingPost || !existingPost.coverImage?.id) {
+    if (!existingPost || !(await uploadFileExists(existingPost.coverImage))) {
       const [tabWithImage] = await withTabImages([tabBlog], { ...options, docId });
 
       return publishTabBlog(strapi, tabWithImage, options);
@@ -440,6 +516,7 @@ const parseCliArgs = (argv) =>
       if (item.startsWith('--text-file=')) args.textFile = item.slice('--text-file='.length);
       if (item.startsWith('--html-file=')) args.htmlFile = item.slice('--html-file='.length);
       if (item === '--with-images') args.withImages = true;
+      if (item === '--sync-existing-images') args.syncExistingImages = true;
       if (item === '--next') args.next = true;
       return args;
     },
@@ -499,9 +576,11 @@ const runCli = async () => {
   try {
     const html = args.htmlFile ? await fs.readFile(args.htmlFile, 'utf8') : undefined;
     const publishOptions = { ...args, html };
-    const results = args.next
-      ? [await publishNextTab(strapi, publishOptions)]
-      : await publishTabRange(strapi, publishOptions);
+    const results = args.syncExistingImages
+      ? await syncExistingTabImages(strapi, publishOptions)
+      : args.next
+        ? [await publishNextTab(strapi, publishOptions)]
+        : await publishTabRange(strapi, publishOptions);
 
     console.log(JSON.stringify(results, null, 2));
   } finally {
@@ -517,6 +596,7 @@ module.exports = {
   publishTabBlog,
   publishTabRange,
   publishNextTab,
+  syncExistingTabImages,
 };
 
 if (require.main === module) {
