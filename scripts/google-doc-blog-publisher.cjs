@@ -394,7 +394,7 @@ const publishTabBlog = async (strapi, tabBlog, options = {}) => {
   if (existingPost) {
     const hasWorkingCoverImage = await uploadFileExists(existingPost.coverImage);
 
-    if (!hasWorkingCoverImage && shouldAttachImages(options) && tabBlog.image) {
+    if ((options.forceImageSync || !hasWorkingCoverImage) && shouldAttachImages(options) && tabBlog.image) {
       const coverImage = await uploadCoverImage(strapi, tabBlog);
       await attachCoverImageToPost(strapi, existingPost, coverImage);
 
@@ -452,12 +452,13 @@ const syncExistingTabImages = async (strapi, options = {}) => {
   const results = [];
 
   for (const tabBlog of selectedTabs) {
-    const existingPost = existingPosts[tabBlog.tab - 1] || (await getExistingPost(strapi, tabBlog.slug));
+    const existingPost = (await getExistingPost(strapi, tabBlog.slug)) || existingPosts[tabBlog.tab - 1];
 
     results.push(
       await publishTabBlog(strapi, tabBlog, {
         ...options,
         existingPost,
+        forceImageSync: true,
         publishMissing: false,
       })
     );
